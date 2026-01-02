@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
-import { Save, Eye, Send, X, Upload, FileText } from "lucide-react";
+import { Save, Eye, Send, X, Upload, FileText, Loader2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { useReports } from "@/hooks/useReports";
 import { insertReportSchema } from "@shared/schema";
@@ -14,6 +14,7 @@ import { useToast } from "@/hooks/use-toast";
 import { format, startOfWeek, endOfWeek, getWeek, getYear } from "date-fns";
 import { ko } from "date-fns/locale";
 import { z } from "zod";
+import { uploadFileToStorage } from "@/lib/firebase";
 
 const reportFormSchema = insertReportSchema.extend({
   budgetLabor: z.string().optional(),
@@ -27,12 +28,19 @@ interface ReportFormProps {
   onBack: () => void;
 }
 
+interface UploadedFileInfo {
+  file: File;
+  url: string;
+  path: string;
+}
+
 export default function ReportForm({ onBack }: ReportFormProps) {
   const { user, userProfile } = useAuth();
   const { createReport, isCreating } = useReports();
   const { toast } = useToast();
   const [showPreview, setShowPreview] = useState(false);
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploadedFile, setUploadedFile] = useState<UploadedFileInfo | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   const currentDate = new Date();
   const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
@@ -63,70 +71,71 @@ export default function ReportForm({ onBack }: ReportFormProps) {
 
   const userInfo = getUserInfo();
 
-  // 파일 업로드 핸들러
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  // 파일 업로드 핸들러 - Firebase Storage 사용
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      // 파일 형식 확인 (Word, PDF, 이미지 파일 허용)
-      const allowedTypes = [
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
-        'application/msword', // .doc
-        'application/pdf', // .pdf
-        'image/jpeg', // .jpg
-        'image/png', // .png
-        'image/gif', // .gif
-      ];
-      
-      if (allowedTypes.includes(file.type)) {
-        // 파일 크기 제한 (10MB)
-        if (file.size > 10 * 1024 * 1024) {
-          toast({
-            title: "파일 크기 초과",
-            description: "파일 크기는 10MB 이하여야 합니다.",
-            variant: "destructive",
-          });
-          return;
-        }
+    if (!file || !user) return;
 
-        // 파일을 base64로 변환하여 저장
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const base64Data = e.target?.result as string;
-          const fileData = {
-            name: file.name,
-            size: file.size,
-            type: file.type,
-            data: base64Data,
-            uploadedAt: new Date().toISOString(),
-          };
-          
-          setUploadedFile(file);
-          // attachments 필드에 파일 데이터 저장
-          form.setValue("attachments", [fileData] as any);
-          form.setValue("thisWeekWork", `업로드된 파일: ${file.name}`);
-          
-          toast({
-            title: "파일 업로드 완료",
-            description: `${file.name} 파일이 업로드되었습니다.`,
-          });
-        };
-        
-        reader.onerror = () => {
-          toast({
-            title: "파일 읽기 오류",
-            description: "파일을 읽는 중 오류가 발생했습니다.",
-            variant: "destructive",
-          });
-        };
-        
-        reader.readAsDataURL(file);
-      } else {
-        toast({
-          title: "파일 형식 오류",
-          description: "Word, PDF, 이미지 파일(.doc, .docx, .pdf, .jpg, .png, .gif)만 업로드 가능합니다.",
-          variant: "destructive",
-        });
-      }
+    // 파일 형식 확인 (Word, PDF, 이미지 파일 허용)
+    const allowedTypes = [
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+      'application/msword', // .doc
+      'application/pdf', // .pdf
+      'image/jpeg', // .jpg
+      'image/png', // .png
+      'image/gif', // .gif
+    ];
+    
+    if (!allowedTypes.includes(file.type)) {
+      toast({
+        title: "파일 형식 오류",
+        description: "Word, PDF, 이미지 파일(.doc, .docx, .pdf, .jpg, .png, .gif)만 업로드 가능합니다.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // 파일 크기 제한 (10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      toast({
+        title: "파일 크기 초과",
+        description: "파일 크기는 10MB 이하여야 합니다.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      // Firebase Storage에 파일 업로드
+      const { url, path } = await uploadFileToStorage(file, user.uid);
+      
+      const fileData = {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        url: url,
+        path: path,
+        uploadedAt: new Date().toISOString(),
+      };
+      
+      setUploadedFile({ file, url, path });
+      form.setValue("attachments", [fileData] as any);
+      form.setValue("thisWeekWork", `업로드된 파일: ${file.name}`);
+      
+      toast({
+        title: "파일 업로드 완료",
+        description: `${file.name} 파일이 Firebase Storage에 업로드되었습니다.`,
+      });
+    } catch (error: any) {
+      console.error("파일 업로드 오류:", error);
+      toast({
+        title: "파일 업로드 실패",
+        description: error.message || "파일 업로드 중 오류가 발생했습니다.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsUploading(false);
     }
   };
 
@@ -255,9 +264,9 @@ export default function ReportForm({ onBack }: ReportFormProps) {
                 {uploadedFile ? (
                   <div className="flex items-center space-x-2">
                     <FileText className="w-5 h-5 text-blue-600" />
-                    <span className="text-sm font-medium">{uploadedFile.name}</span>
+                    <span className="text-sm font-medium">{uploadedFile.file.name}</span>
                     <span className="text-xs text-gray-500">
-                      ({(uploadedFile.size / 1024 / 1024).toFixed(2)} MB)
+                      ({(uploadedFile.file.size / 1024 / 1024).toFixed(2)} MB)
                     </span>
                   </div>
                 ) : (
@@ -383,16 +392,24 @@ export default function ReportForm({ onBack }: ReportFormProps) {
                           </label>
                         </div>
 
+                        {/* 업로드 중 표시 */}
+                        {isUploading && (
+                          <div className="flex items-center justify-center p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                            <Loader2 className="w-5 h-5 text-blue-600 animate-spin mr-2" />
+                            <span className="text-sm text-blue-800">파일 업로드 중...</span>
+                          </div>
+                        )}
+
                         {/* 업로드된 파일 표시 */}
-                        {uploadedFile && (
+                        {uploadedFile && !isUploading && (
                           <div className="flex items-center justify-between p-3 bg-blue-50 border border-blue-200 rounded-lg">
                             <div className="flex items-center space-x-2">
                               <FileText className="w-5 h-5 text-blue-600" />
                               <span className="text-sm font-medium text-blue-800">
-                                {uploadedFile.name}
+                                {uploadedFile.file.name}
                               </span>
                               <span className="text-xs text-blue-600">
-                                ({(uploadedFile.size / 1024 / 1024).toFixed(2)} MB)
+                                ({(uploadedFile.file.size / 1024 / 1024).toFixed(2)} MB)
                               </span>
                             </div>
                             <Button
