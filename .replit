@@ -33,3 +33,9 @@ outputType = "webview"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+VITE_FIREBASE_PROJECT_ID = "gen-lang-client-0256322338"
+VITE_FIREBASE_APP_ID = "1:417768322061:web:0790ef6169f1e31b70d144"
